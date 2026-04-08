@@ -1,32 +1,19 @@
-// Improved Compliance Engine with Arabic normalization + synonyms
-
 const SYNONYMS = {
   "أجر": ["راتب", "مستحقات", "أجر"],
-  "دفع": ["سداد", "تحويل", "دفع"],
-  "شهري": ["شهري", "كل شهر"],
-  "عقد": ["اتفاقية", "عقد"],
-  "غرامة": ["جزاء", "عقوبة", "غرامة"]
+  "دفع": ["سداد", "تحويل", "صرف"],
+  "عقد": ["اتفاقية", "تعاقد"],
+  "غرامة": ["جزاء", "عقوبة"]
 };
 
-// تنظيف النص
 function normalizeText(text) {
+  if (!text) return "";
   return text
     .toLowerCase()
-    .replace(/[^\w\s\u0600-\u06FF]/g, "") // يدعم العربي
-    .replace(/\s+/g, " ");
-}
-
-// توسيع الكلمات
-function expandKeywords(keywords) {
-  let expanded = [];
-  keywords.forEach(k => {
-    if (SYNONYMS[k]) {
-      expanded = expanded.concat(SYNONYMS[k]);
-    } else {
-      expanded.push(k);
-    }
-  });
-  return [...new Set(expanded)];
+    .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()؟،"']/g, "")
+    .replace(/\s{2,}/g, " ")
+    .replace(/ة/g, "ه")
+    .replace(/ى/g, "ي")
+    .trim();
 }
 
 export function runComplianceCheck(document, regulations) {
@@ -35,93 +22,145 @@ export function runComplianceCheck(document, regulations) {
   let compliantWeight = 0;
   const conflicts = [];
   const recommendations = [];
+  
+  const contentNorm = normalizeText(document?.content || "");
+  let hasAnyMatch = false;
 
-  const content = normalizeText(document.content);
-
-  regulations.forEach(reg => {
-    reg.clauses.forEach(clause => {
+  (regulations || []).forEach(reg => {
+    (reg.clauses || []).forEach(clause => {
       totalWeight += clause.weight;
+      
+      const matchedOriginals = [];
+      const missingKeywords = [];
 
-      const expandedKeywords = expandKeywords(clause.keywords);
+      clause.keywords.forEach(kw => {
+        const kwNorm = normalizeText(kw);
+        let syns = [kwNorm];
+        
+        for (const [key, values] of Object.entries(SYNONYMS)) {
+          const keyNorm = normalizeText(key);
+          const valuesNorm = values.map(normalizeText);
+          if (keyNorm === kwNorm || valuesNorm.includes(kwNorm)) {
+            syns = [...new Set([...syns, keyNorm, ...valuesNorm])];
+          }
+        }
 
-      const matched = expandedKeywords.filter(kw =>
-        content.includes(normalizeText(kw))
-      );
+        if (syns.some(syn => contentNorm.includes(syn))) {
+          matchedOriginals.push(kw);
+          hasAnyMatch = true;
+        } else {
+          missingKeywords.push(kw);
+        }
+      });
 
-      const matchRatio = matched.length / expandedKeywords.length;
-
-      let status = "failed";
-
-      if (matchRatio >= 0.3) {
-        status = "passed";
-        compliantWeight += clause.weight;
-      } else if (matchRatio >= 0.15) {
-        status = "warning";
-        compliantWeight += clause.weight * 0.5;
+      const matchRatio = clause.keywords.length > 0 ? (matchedOriginals.length / clause.keywords.length) : 0;
+      
+      let status = 'failed';
+      if (matchRatio >= 0.3) { 
+        status = 'passed'; 
+        compliantWeight += clause.weight; 
+      } else if (matchRatio >= 0.15) { 
+        status = 'warning'; 
+        compliantWeight += clause.weight * 0.5; 
       }
 
-      results.push({
+      const entry = {
+        regulationId: reg.id,
+        regulationTitle: reg.titleEn,
+        regulationTitleAr: reg.titleAr,
+        clauseId: clause.id,
         clauseText: clause.text,
         status,
         matchRatio: Math.round(matchRatio * 100),
-        matchedKeywords: matched,
-        weight: clause.weight
-      });
+        matchedKeywords: matchedOriginals,
+        missingKeywords: missingKeywords,
+        weight: clause.weight,
+      };
+      
+      results.push(entry);
 
-      if (status === "failed") {
+      if (status === 'failed') {
         conflicts.push({
           clause: clause.text,
-          regulation: reg.titleAr,
-          severity: clause.weight >= 3 ? "high" : "medium",
-          detail: "لم يتم العثور على كلمات مطابقة"
+          regulation: reg.titleEn,
+          regulationAr: reg.titleAr,
+          severity: clause.weight >= 3 ? 'high' : 'medium',
+          detail: `الكلمات المفقودة: ${missingKeywords.join('، ')}`,
         });
-
+        
         recommendations.push({
-          text: `يُنصح بمراجعة البند: "${clause.text}"`,
-          priority: clause.weight >= 3 ? "high" : "medium"
+          regulation: reg.titleEn,
+          regulationAr: reg.titleAr,
+          text: `يوصى بمراجعة هذا البند لضمان توافقه مع النظام`,
+          textAr: `يوصى بمراجعة هذا البند لضمان توافقه مع النظام`,
+          priority: clause.weight >= 3 ? 'high' : 'medium',
+        });
+      } else if (status === 'warning') {
+        recommendations.push({
+          regulation: reg.titleEn,
+          regulationAr: reg.titleAr,
+          text: `يوجد تعارض محتمل. يوصى بتعديل البند ليكون أكثر توافقاً.`,
+          textAr: `يوجد تعارض محتمل. يوصى بتعديل البند ليكون أكثر توافقاً.`,
+          priority: 'low',
         });
       }
     });
   });
 
-  // fallback لو ما فيه نتائج
   if (results.length === 0) {
     return {
       score: 0,
       riskLevel: "high",
-      results: [],
-      conflicts: [{
-        clause: "لا يوجد تطابق",
-        regulation: "النظام",
-        severity: "high",
-        detail: "لم يتم العثور على أي كلمات قانونية"
+      results: [{
+        regulationTitleAr: 'تنبيه النظام',
+        clauseText: 'لا توجد بنود متاحة للفحص',
+        status: 'warning',
+        matchRatio: 0,
+        matchedKeywords: [],
+        missingKeywords: [],
+        weight: 0
       }],
+      conflicts: [],
       recommendations: [{
-        text: "أضف كلمات قانونية أو عدل المستند",
-        priority: "high"
+        regulationAr: "عام",
+        text: "تنبيه: لم يتم العثور على أي نتائج مطابقة. يرجى التحقق من المدخلات.",
+        textAr: "تنبيه: لم يتم العثور على أي نتائج مطابقة. يرجى التحقق من المدخلات.",
+        priority: "high",
       }],
-      totalClauses: 0,
+      totalClauses: 1,
       passedClauses: 0,
       failedClauses: 0,
-      warningClauses: 0
+      warningClauses: 1
     };
   }
 
-  const score = Math.round((compliantWeight / totalWeight) * 100);
+  if (!hasAnyMatch) {
+    recommendations.unshift({
+      regulationAr: "عام",
+      text: "تنبيه: لم يتم العثور على أي ارتباطات قانونية في المستند. يوصى بمراجعة وتعديل النص لتضمين المصطلحات النظامية.",
+      textAr: "تنبيه: لم يتم العثور على أي ارتباطات قانونية في المستند. يوصى بمراجعة وتعديل النص لتضمين المصطلحات النظامية.",
+      priority: "high"
+    });
+  }
 
-  let riskLevel = "low";
-  if (score < 50) riskLevel = "high";
-  else if (score < 75) riskLevel = "medium";
+  const score = totalWeight > 0 ? Math.round((compliantWeight / totalWeight) * 100) : 0;
+  let riskLevel = 'low';
+  if (score < 50) riskLevel = 'high';
+  else if (score < 75) riskLevel = 'medium';
+
+  const uniqueRecommendations = recommendations.filter((r, index, self) =>
+    index === self.findIndex((t) => t.textAr === r.textAr)
+  );
 
   return {
     score,
     riskLevel,
     results,
     conflicts,
-    recommendations,
+    recommendations: uniqueRecommendations,
     totalClauses: results.length,
-    passedClauses: results.filter(r => r.status === "passed").length,
-    failedClauses: results.filter(r => r.status === "failed").length,
-    warningClauses: results.filter(r => r.status === "warning").length
+    passedClauses: results.filter(r => r.status === 'passed').length,
+    failedClauses: results.filter(r => r.status === 'failed').length,
+    warningClauses: results.filter(r => r.status === 'warning').length
   };
 }
